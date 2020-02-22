@@ -226,21 +226,33 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 		return -1;
 	}
 
+#ifdef USE_MUTEX_INSTEAD_WAIT
 	mutex_lock(&client->device_event_mutex);
+#endif
 	if (recovery_send_kernelcache(client, build_identity) < 0) {
+#ifdef USE_MUTEX_INSTEAD_WAIT		
 		mutex_unlock(&client->device_event_mutex);
+#endif		
 		error("ERROR: Unable to send KernelCache\n");
 		return -1;
 	}
 
 	debug("DEBUG: Waiting for device to disconnect...\n");
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 30000);
+#else
+	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 30);
+#endif	
 	if (client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 		mutex_unlock(&client->device_event_mutex);
+#endif		
 		error("ERROR: Failed to place device in restore mode\n");
 		return -1;
 	}
+#ifdef USE_MUTEX_INSTEAD_WAIT		
 	mutex_unlock(&client->device_event_mutex);
+#endif	
 
 	return 0;
 }

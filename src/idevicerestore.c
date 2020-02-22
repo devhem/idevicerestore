@@ -218,26 +218,38 @@ static void idevice_event_cb(const idevice_event_t *event, void *userdata)
 			return;
 		}
 		if (normal_check_mode(client) == 0) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			mutex_lock(&client->device_event_mutex);
+#endif			
 			client->mode = &idevicerestore_modes[MODE_NORMAL];
 			debug("%s: device " FMT_016llx " (udid: %s) connected in normal mode\n", __func__, client->ecid, client->udid);
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 		} else if (client->ecid && restore_check_mode(client) == 0) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			mutex_lock(&client->device_event_mutex);
+#endif			
 			client->mode = &idevicerestore_modes[MODE_RESTORE];
 			debug("%s: device " FMT_016llx " (udid: %s) connected in restore mode\n", __func__, client->ecid, client->udid);
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 		}
 	} else if (event->event == IDEVICE_DEVICE_REMOVE) {
 		if (client->udid && !strcmp(event->udid, client->udid)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			mutex_lock(&client->device_event_mutex);
+#endif			
 			client->mode = &idevicerestore_modes[MODE_UNKNOWN];
 			debug("%s: device " FMT_016llx " (udid: %s) disconnected\n", __func__, client->ecid, client->udid);
 			client->ignore_device_add_events = 0;
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 		}
 	}
 }
@@ -250,7 +262,9 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 			client->ecid = event->device_info->ecid;
 		}
 		if (client->ecid && event->device_info->ecid == client->ecid) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			mutex_lock(&client->device_event_mutex);
+#endif			
 			switch (event->mode) {
 				case IRECV_K_WTF_MODE:
 					client->mode = &idevicerestore_modes[MODE_WTF];
@@ -268,8 +282,10 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 					client->mode = &idevicerestore_modes[MODE_UNKNOWN];
 			}
 			debug("%s: device " FMT_016llx " (udid: %s) connected in %s mode\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A", client->mode->string);
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			cond_signal(&client->device_event_cond);
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 		}
 	} else if (event->type == IRECV_DEVICE_REMOVE) {
 		if (client->ecid && event->device_info->ecid == client->ecid) {
@@ -315,16 +331,25 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	client->idevice_e_ctx = idevice_event_cb;
 
 	// check which mode the device is currently in so we know where to start
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 	mutex_lock(&client->device_event_mutex);
 	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+#else
+	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
+#endif	
+
 	if (client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 		mutex_unlock(&client->device_event_mutex);
+#endif		
 		error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 		return -1;
 	}
 	idevicerestore_progress(client, RESTORE_STEP_DETECT, 0.1);
 	info("Found device in %s mode\n", client->mode->string);
+#ifdef USE_MUTEX_INSTEAD_WAIT		
 	mutex_unlock(&client->device_event_mutex);
+#endif	
 
 	if (client->mode->index == MODE_WTF) {
 		unsigned int cpid = 0;
@@ -390,7 +415,9 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			}
 		}
 
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 		mutex_lock(&client->device_event_mutex);
+#endif		
 		if (wtftmp) {
 			if (dfu_send_buffer(client, wtftmp, wtfsize) != 0) {
 				error("ERROR: Could not send WTF...\n");
@@ -400,14 +427,22 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 
 		free(wtftmp);
 
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_DFU] || (client->flags & FLAG_QUIT), 10); /* TODO: verify if it actually goes from 0x1222 -> 0x1227 */
+#endif		
 		if (client->mode != &idevicerestore_modes[MODE_DFU] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT				
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 			/* TODO: verify if it actually goes from 0x1222 -> 0x1227 */
 			error("ERROR: Failed to put device into DFU from WTF mode\n");
 			return -1;
 		}
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 		mutex_unlock(&client->device_event_mutex);
+#endif		
 	}
 
 	// discover the device type
@@ -576,15 +611,23 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			}
 
 			// we need to refresh the current mode again
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 			mutex_lock(&client->device_event_mutex);
 			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
+#else
+			WAIT_FOR(client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 60);
+#endif			
 			if (client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT					
 				mutex_unlock(&client->device_event_mutex);
+#endif				
 				error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 				return -1;
 			}
 			info("Found device in %s mode\n", client->mode->string);
+#ifdef USE_MUTEX_INSTEAD_WAIT				
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 		}
 	}
 
@@ -1202,11 +1245,15 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			}
 		}
 
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 		mutex_lock(&client->device_event_mutex);
+#endif		
 
 		/* now we load the iBEC */
 		if (recovery_send_ibec(client, build_identity) < 0) {
+#ifdef USE_MUTEX_INSTEAD_WAIT				
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 			error("ERROR: Unable to send iBEC\n");
 			if (delete_fs && filesystem)
 				unlink(filesystem);
@@ -1215,9 +1262,15 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		recovery_client_free(client);
 
 		debug("Waiting for device to disconnect...\n");
+#ifdef USE_MUTEX_INSTEAD_WAIT
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
+#endif		
 		if (client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT			
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 
 			if (!(client->flags & FLAG_QUIT)) {
 				error("ERROR: Device did not disconnect. Possibly invalid iBEC. Reset device and try again.\n");
@@ -1227,9 +1280,15 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			return -2;
 		}
 		debug("Waiting for device to reconnect in recovery mode...\n");
+#ifdef USE_MUTEX_INSTEAD_WAIT		
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 10);
+#endif		
 		if (client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT					
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 			if (!(client->flags & FLAG_QUIT)) {
 				error("ERROR: Device did not reconnect in recovery mode. Possibly invalid iBEC. Reset device and try again.\n");
 			}
@@ -1237,7 +1296,9 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 				unlink(filesystem);
 			return -2;
 		}
+#ifdef USE_MUTEX_INSTEAD_WAIT				
 		mutex_unlock(&client->device_event_mutex);
+#endif		
 	}
 	idevicerestore_progress(client, RESTORE_STEP_PREPARE, 0.5);
 	if (client->flags & FLAG_QUIT) {
@@ -1317,17 +1378,27 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	idevicerestore_progress(client, RESTORE_STEP_PREPARE, 0.9);
 
 	if (client->mode->index != MODE_RESTORE) {
+#ifdef USE_MUTEX_INSTEAD_WAIT				
 		mutex_lock(&client->device_event_mutex);
+#endif		
 		info("Waiting for device to enter restore mode...\n");
+#ifdef USE_MUTEX_INSTEAD_WAIT				
 		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 180000);
+#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RESTORE] || (client->flags & FLAG_QUIT), 180);
+#endif		
 		if (client->mode != &idevicerestore_modes[MODE_RESTORE] || (client->flags & FLAG_QUIT)) {
+#ifdef USE_MUTEX_INSTEAD_WAIT							
 			mutex_unlock(&client->device_event_mutex);
+#endif			
 			error("ERROR: Device failed to enter restore mode.\n");
 			if (delete_fs && filesystem)
 				unlink(filesystem);
 			return -1;
 		}
+#ifdef USE_MUTEX_INSTEAD_WAIT						
 		mutex_unlock(&client->device_event_mutex);
+#endif		
 	}
 
 	// device is finally in restore mode, let's do this
@@ -1384,8 +1455,10 @@ struct idevicerestore_client_t* idevicerestore_client_new(void)
 	}
 	memset(client, '\0', sizeof(struct idevicerestore_client_t));
 	client->mode = &idevicerestore_modes[MODE_UNKNOWN];
+#ifdef USE_MUTEX_INSTEAD_WAIT					
 	mutex_init(&client->device_event_mutex);
 	cond_init(&client->device_event_cond);
+#endif	
 	return client;
 }
 
@@ -1401,9 +1474,11 @@ void idevicerestore_client_free(struct idevicerestore_client_t* client)
 	if (client->idevice_e_ctx) {
 		idevice_event_unsubscribe();
 	}
+#ifdef USE_MUTEX_INSTEAD_WAIT					
 	cond_destroy(&client->device_event_cond);
 	mutex_destroy(&client->device_event_mutex);
-
+#endif
+	
 	if (client->tss_url) {
 		free(client->tss_url);
 	}

@@ -58,6 +58,9 @@ extern "C" {
 
 #define USER_AGENT_STRING "InetURL/1.0"
 
+
+#define USE_MUTEX_INSTEAD_WAIT            0
+
 struct dfu_client_t;
 struct normal_client_t;
 struct restore_client_t;
@@ -109,8 +112,10 @@ struct idevicerestore_client_t {
 	void* progress_cb_data;
 	irecv_device_event_context_t irecv_e_ctx;
 	void* idevice_e_ctx;
+#ifdef USE_MUTEX_INSTEAD_WAIT	
 	mutex_t device_event_mutex;
 	cond_t device_event_cond;
+#endif	
 	int ignore_device_add_events;
 };
 
