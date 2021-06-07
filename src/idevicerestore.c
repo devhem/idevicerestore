@@ -38,6 +38,13 @@
 
 #include <curl/curl.h>
 
+#ifdef HAVE_OPENSSL
+#include <openssl/sha.h>
+#else
+#include "sha512.h"
+#define SHA384 sha384
+#endif
+
 #include "dfu.h"
 #include "tss.h"
 #include "img3.h"
@@ -58,24 +65,26 @@
 
 #ifndef IDEVICERESTORE_NOMAIN
 static struct option longopts[] = {
-	{ "ecid",    required_argument, NULL, 'i' },
-	{ "udid",    required_argument, NULL, 'u' },
-	{ "debug",   no_argument,       NULL, 'd' },
-	{ "help",    no_argument,       NULL, 'h' },
-	{ "erase",   no_argument,       NULL, 'e' },
-	{ "custom",  no_argument,       NULL, 'c' },
-	{ "latest",  no_argument,       NULL, 'l' },
-	{ "cydia",   no_argument,       NULL, 's' },
-	{ "exclude", no_argument,       NULL, 'x' },
-	{ "shsh",    no_argument,       NULL, 't' },
-	{ "keep-pers", no_argument,     NULL, 'k' },
-	{ "pwn",     no_argument,       NULL, 'p' },
-	{ "no-action", no_argument,     NULL, 'n' },
-	{ "cache-path", required_argument, NULL, 'C' },
-	{ "no-input", no_argument,      NULL, 'y' },
-	{ "plain-progress", no_argument, NULL, 'P' },
-	{ "restore-mode", no_argument,  NULL, 'R' },
-	{ "ticket", required_argument,  NULL, 'T' },
+	{ "ecid",           required_argument, NULL, 'i' },
+	{ "udid",           required_argument, NULL, 'u' },
+	{ "debug",          no_argument,       NULL, 'd' },
+	{ "help",           no_argument,       NULL, 'h' },
+	{ "erase",          no_argument,       NULL, 'e' },
+	{ "custom",         no_argument,       NULL, 'c' },
+	{ "latest",         no_argument,       NULL, 'l' },
+	{ "cydia",          no_argument,       NULL, 's' },
+	{ "exclude",        no_argument,       NULL, 'x' },
+	{ "shsh",           no_argument,       NULL, 't' },
+	{ "keep-pers",      no_argument,       NULL, 'k' },
+	{ "pwn",            no_argument,       NULL, 'p' },
+	{ "no-action",      no_argument,       NULL, 'n' },
+	{ "cache-path",     required_argument, NULL, 'C' },
+	{ "no-input",       no_argument,       NULL, 'y' },
+	{ "plain-progress", no_argument,       NULL, 'P' },
+	{ "restore-mode",   no_argument,       NULL, 'R' },
+	{ "ticket",         required_argument, NULL, 'T' },
+	{ "no-restore",     no_argument,       NULL, 'z' },
+	{ "version",        no_argument,       NULL, 'v' },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -84,50 +93,63 @@ static void usage(int argc, char* argv[], int err)
 	char* name = strrchr(argv[0], '/');
 	fprintf((err) ? stderr : stdout,
 	"Usage: %s [OPTIONS] PATH\n" \
+	"\n" \
 	"Restore IPSW firmware at PATH to an iOS device.\n" \
 	"\n" \
 	"PATH can be a compressed .ipsw file or a directory containing all files\n" \
 	"extracted from an IPSW.\n" \
 	"\n" \
-	"Options:\n" \
-	" -i, --ecid ECID  Target specific device by its ECID\n" \
-	"                  e.g. 0xaabb123456 (hex) or 1234567890 (decimal)\n" \
-	" -u, --udid UDID  Target specific device by its device UDID\n" \
-	"                  NOTE: only works with devices in normal mode.\n" \
-	" -l, --latest     Use latest available firmware (with download on demand).\n" \
-	"                  Before performing any action it will interactively ask to\n" \
-	"                  select one of the currently signed firmware versions,\n" \
-	"                  unless -y has been given too.\n" \
-	"                  The PATH argument is ignored when using this option.\n" \
-	"                  DO NOT USE if you need to preserve the baseband (unlock)!\n" \
-	"                  USE WITH CARE if you want to keep a jailbreakable firmware!\n" \
-	" -e, --erase      Perform a full restore, erasing all data (defaults to update)\n" \
-	"                  DO NOT USE if you want to preserve user data on the device!\n" \
-	" -y, --no-input   Non-interactive mode, do not ask for any input.\n" \
-	"                  WARNING: This will disable certain checks/prompts that are\n" \
-	"                  supposed to prevent DATA LOSS. Use with caution.\n" \
-	" -n, --no-action  Do not perform any restore action. If combined with -l option\n" \
-	"                  the on-demand ipsw download is performed before exiting.\n" \
-	" -h, --help       Prints this usage information\n" \
-	" -C, --cache-path DIR  Use specified directory for caching extracted or other\n" \
-	"                  reused files.\n" \
-	" -d, --debug      Enable communication debugging\n" \
+	"OPTIONS:\n" \
+	"  -i, --ecid ECID       Target specific device by its ECID\n" \
+	"                        e.g. 0xaabb123456 (hex) or 1234567890 (decimal)\n" \
+	"  -u, --udid UDID       Target specific device by its device UDID\n" \
+	"                        NOTE: only works with devices in normal mode.\n" \
+	"  -l, --latest          Use latest available firmware (with download on demand).\n" \
+	"                        Before performing any action it will interactively ask\n" \
+	"                        to select one of the currently signed firmware versions,\n" \
+	"                        unless -y has been given too.\n" \
+	"                        The PATH argument is ignored when using this option.\n" \
+	"                        DO NOT USE if you need to preserve the baseband/unlock!\n" \
+	"                        USE WITH CARE if you want to keep a jailbreakable\n" \
+	"                        firmware!\n" \
+	"  -e, --erase           Perform full restore instead of update, erasing all data\n" \
+	"                        DO NOT USE if you want to preserve user data on the device!\n" \
+	"  -y, --no-input        Non-interactive mode, do not ask for any input.\n" \
+	"                        WARNING: This will disable certain checks/prompts that\n" \
+	"                        are supposed to prevent DATA LOSS. Use with caution.\n" \
+	"  -n, --no-action       Do not perform any restore action. If combined with -l\n" \
+	"                        option the on-demand ipsw download is performed before\n" \
+	"                        exiting.\n" \
+	"  -h, --help            Prints this usage information\n" \
+	"  -C, --cache-path DIR  Use specified directory for caching extracted or other\n" \
+	"                        reused files.\n" \
+	"  -d, --debug           Enable communication debugging\n" \
+	"  -v, --version         Print version information\n" \
 	"\n" \
 	"Advanced/experimental options:\n"
-	" -c, --custom     Restore with a custom firmware\n" \
-	" -s, --cydia      Use Cydia's signature service instead of Apple's\n" \
-	" -x, --exclude    Exclude nor/baseband upgrade\n" \
-	" -t, --shsh       Fetch TSS record and save to .shsh file, then exit\n" \
-	" -k, --keep-pers  Write personalized components to files for debugging\n" \
-	" -p, --pwn        Put device in pwned DFU mode and exit (limera1n devices only)\n" \
-	" -P, --plain-progress  Print progress as plain step and progress\n" \
-	" -R, --restore-mode  Allow restoring from Restore mode\n" \
-	" -T, --ticket PATH   Use file at PATH to send as AP ticket\n" \
+	"  -c, --custom          Restore with a custom firmware (requires bootrom exploit)\n" \
+	"  -s, --cydia           Use Cydia's signature service instead of Apple's\n" \
+	"  -x, --exclude         Exclude nor/baseband upgrade\n" \
+	"  -t, --shsh            Fetch TSS record and save to .shsh file, then exit\n" \
+	"  -z, --no-restore      Do not restore and end after booting to the ramdisk\n" \
+	"  -k, --keep-pers       Write personalized components to files for debugging\n" \
+	"  -p, --pwn             Put device in pwned DFU mode and exit (limera1n devices)\n" \
+	"  -P, --plain-progress  Print progress as plain step and progress\n" \
+	"  -R, --restore-mode    Allow restoring from Restore mode\n" \
+	"  -T, --ticket PATH     Use file at PATH to send as AP ticket\n" \
 	"\n" \
-	"Homepage: <" PACKAGE_URL ">\n",
+	"Homepage:    <" PACKAGE_URL ">\n" \
+	"Bug Reports: <" PACKAGE_BUGREPORT ">\n",
 	(name ? name + 1 : argv[0]));
 }
 #endif
+
+const uint8_t lpol_file[22] = {
+		0x30, 0x14, 0x16, 0x04, 0x49, 0x4d, 0x34, 0x50,
+		0x16, 0x04,	0x6c, 0x70,	0x6f, 0x6c,	0x16, 0x03,
+		0x31, 0x2e, 0x30, 0x04,	0x01, 0x00
+};
+const uint32_t lpol_file_length = 22;
 
 static int idevicerestore_keep_pers = 0;
 
@@ -213,43 +235,50 @@ static int compare_versions(const char *s_ver1, const char *s_ver2)
 static void idevice_event_cb(const idevice_event_t *event, void *userdata)
 {
 	struct idevicerestore_client_t *client = (struct idevicerestore_client_t*)userdata;
+#ifdef HAVE_ENUM_IDEVICE_CONNECTION_TYPE
+	if (event->conn_type != CONNECTION_USBMUXD) {
+		// ignore everything but devices connected through USB
+		return;
+	}
+#endif
 	if (event->event == IDEVICE_DEVICE_ADD) {
 		if (client->ignore_device_add_events) {
 			return;
 		}
 		if (normal_check_mode(client) == 0) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-			mutex_lock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT	
+				mutex_lock(&client->device_event_mutex);
+			#endif
 			client->mode = &idevicerestore_modes[MODE_NORMAL];
-			debug("%s: device " FMT_016llx " (udid: %s) connected in normal mode\n", __func__, client->ecid, client->udid);
-#ifdef USE_MUTEX_INSTEAD_WAIT			
+			debug("%s: device %016" PRIx64 " (udid: %s) connected in normal mode\n", __func__, client->ecid, client->udid);
 			cond_signal(&client->device_event_cond);
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 		} else if (client->ecid && restore_check_mode(client) == 0) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-			mutex_lock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT	
+				mutex_lock(&client->device_event_mutex);
+			#endif
 			client->mode = &idevicerestore_modes[MODE_RESTORE];
-			debug("%s: device " FMT_016llx " (udid: %s) connected in restore mode\n", __func__, client->ecid, client->udid);
-#ifdef USE_MUTEX_INSTEAD_WAIT			
+			debug("%s: device %016" PRIx64 " (udid: %s) connected in restore mode\n", __func__, client->ecid, client->udid);
 			cond_signal(&client->device_event_cond);
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
+
 		}
 	} else if (event->event == IDEVICE_DEVICE_REMOVE) {
 		if (client->udid && !strcmp(event->udid, client->udid)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-			mutex_lock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT	
+				mutex_lock(&client->device_event_mutex);
+			#endif
 			client->mode = &idevicerestore_modes[MODE_UNKNOWN];
-			debug("%s: device " FMT_016llx " (udid: %s) disconnected\n", __func__, client->ecid, client->udid);
+			debug("%s: device %016" PRIx64 " (udid: %s) disconnected\n", __func__, client->ecid, client->udid);
 			client->ignore_device_add_events = 0;
-#ifdef USE_MUTEX_INSTEAD_WAIT			
 			cond_signal(&client->device_event_cond);
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 		}
 	}
 }
@@ -262,9 +291,9 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 			client->ecid = event->device_info->ecid;
 		}
 		if (client->ecid && event->device_info->ecid == client->ecid) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-			mutex_lock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT	
+				mutex_lock(&client->device_event_mutex);
+			#endif
 			switch (event->mode) {
 				case IRECV_K_WTF_MODE:
 					client->mode = &idevicerestore_modes[MODE_WTF];
@@ -281,19 +310,23 @@ static void irecv_event_cb(const irecv_device_event_t* event, void *userdata)
 				default:
 					client->mode = &idevicerestore_modes[MODE_UNKNOWN];
 			}
-			debug("%s: device " FMT_016llx " (udid: %s) connected in %s mode\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A", client->mode->string);
-#ifdef USE_MUTEX_INSTEAD_WAIT			
+			debug("%s: device %016" PRIx64 " (udid: %s) connected in %s mode\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A", client->mode->string);
 			cond_signal(&client->device_event_cond);
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 		}
 	} else if (event->type == IRECV_DEVICE_REMOVE) {
 		if (client->ecid && event->device_info->ecid == client->ecid) {
-			mutex_lock(&client->device_event_mutex);
+			#ifdef USE_MUTEX_INSTEAD_WAIT	
+				mutex_lock(&client->device_event_mutex);
+			#endif
 			client->mode = &idevicerestore_modes[MODE_UNKNOWN];
-			debug("%s: device " FMT_016llx " (udid: %s) disconnected\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A");
+			debug("%s: device %016" PRIx64 " (udid: %s) disconnected\n", __func__, client->ecid, (client->udid) ? client->udid : "N/A");
 			cond_signal(&client->device_event_cond);
-			mutex_unlock(&client->device_event_mutex);
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 		}
 	}
 }
@@ -331,25 +364,28 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	client->idevice_e_ctx = idevice_event_cb;
 
 	// check which mode the device is currently in so we know where to start
-#ifdef USE_MUTEX_INSTEAD_WAIT	
-	mutex_lock(&client->device_event_mutex);
-	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-#else
-	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT	
+		mutex_lock(&client->device_event_mutex);
+	#endif
 
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+	#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
+	#endif	
+	
 	if (client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 		error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 		return -1;
 	}
 	idevicerestore_progress(client, RESTORE_STEP_DETECT, 0.1);
 	info("Found device in %s mode\n", client->mode->string);
-#ifdef USE_MUTEX_INSTEAD_WAIT		
-	mutex_unlock(&client->device_event_mutex);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		mutex_unlock(&client->device_event_mutex);
+	#endif
 
 	if (client->mode->index == MODE_WTF) {
 		unsigned int cpid = 0;
@@ -358,7 +394,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			error("ERROR: Could not open device in WTF mode\n");
 			return -1;
 		}
-		if ((dfu_get_cpid(client, &cpid) < 0) || (cpid == 0)) { 
+		if ((dfu_get_cpid(client, &cpid) < 0) || (cpid == 0)) {
 			error("ERROR: Could not get CPID for WTF mode device\n");
 			dfu_client_free(client);
 			return -1;
@@ -415,9 +451,9 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			}
 		}
 
-#ifdef USE_MUTEX_INSTEAD_WAIT	
-		mutex_lock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT	
+			mutex_lock(&client->device_event_mutex);
+		#endif
 		if (wtftmp) {
 			if (dfu_send_buffer(client, wtftmp, wtfsize) != 0) {
 				error("ERROR: Could not send WTF...\n");
@@ -427,22 +463,23 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 
 		free(wtftmp);
 
-#ifdef USE_MUTEX_INSTEAD_WAIT	
-		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-#else
-		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_DFU] || (client->flags & FLAG_QUIT), 10); /* TODO: verify if it actually goes from 0x1222 -> 0x1227 */
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+		#else
+			WAIT_FOR(client->mode == &idevicerestore_modes[MODE_DFU] || (client->flags & FLAG_QUIT), 10);
+		#endif	
+
 		if (client->mode != &idevicerestore_modes[MODE_DFU] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 			/* TODO: verify if it actually goes from 0x1222 -> 0x1227 */
 			error("ERROR: Failed to put device into DFU from WTF mode\n");
 			return -1;
 		}
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 	}
 
 	// discover the device type
@@ -531,7 +568,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 				}
 				unsigned long selected = strtoul(input, NULL, 10);
 				if (selected == 0 || selected > count) {
-					printf("Invalid input value. Must be in range: 1..%d\n", count);
+					printf("Invalid input value. Must be in range: 1..%u\n", count);
 					continue;
 				}
 				selected_fw = plist_array_get_item(signed_fws, (uint32_t)selected-1);
@@ -611,23 +648,27 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			}
 
 			// we need to refresh the current mode again
-#ifdef USE_MUTEX_INSTEAD_WAIT	
-			mutex_lock(&client->device_event_mutex);
-			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
-#else
-			WAIT_FOR(client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 60);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT	
+				mutex_lock(&client->device_event_mutex);
+			#endif
+
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
+			#else
+				WAIT_FOR(client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 60);
+			#endif	
+
 			if (client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT					
-				mutex_unlock(&client->device_event_mutex);
-#endif				
+				#ifdef USE_MUTEX_INSTEAD_WAIT
+					mutex_unlock(&client->device_event_mutex);
+				#endif
 				error("ERROR: Unable to discover device mode. Please make sure a device is attached.\n");
 				return -1;
 			}
 			info("Found device in %s mode\n", client->mode->string);
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 		}
 	}
 
@@ -930,7 +971,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	// Get filesystem name from build identity
 	char* fsname = NULL;
 	if (build_identity_get_component_path(build_identity, "OS", &fsname) < 0) {
-		error("ERROR: Unable get path for filesystem component\n");
+		error("ERROR: Unable to get path for filesystem component\n");
 		return -1;
 	}
 
@@ -1028,7 +1069,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			remove(tmpf);
 			rename(filesystem, tmpf);
 			free(filesystem);
-			filesystem = strdup(tmpf); 
+			filesystem = strdup(tmpf);
 		}
 	}
 
@@ -1043,7 +1084,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			error("ERROR: Unable to find device ECID\n");
 			return -1;
 		}
-		info("Found ECID " FMT_qu "\n", (long long unsigned int)client->ecid);
+		info("Found ECID %" PRIu64 "\n", client->ecid);
 
 		if (client->mode->index == MODE_NORMAL && !(client->flags & FLAG_ERASE) && !(client->flags & FLAG_SHSHONLY)) {
 			plist_t node = normal_get_lockdown_value(client, NULL, "HasSiDP");
@@ -1096,10 +1137,23 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		if (client->flags & FLAG_QUIT) {
 			return -1;
 		}
+		
 		if (get_tss_response(client, build_identity, &client->tss) < 0) {
 			error("ERROR: Unable to get SHSH blobs for this device\n");
 			return -1;
 		}
+		if (client->build_major >= 20) {
+			if (get_local_policy_tss_response(client, build_identity, &client->tss_localpolicy) < 0) {
+				error("ERROR: Unable to get SHSH blobs for this device (local policy)\n");
+				return -1;
+			}
+			if (get_recoveryos_root_ticket_tss_response(client, build_identity, &client->tss_recoveryos_root_ticket) <
+				0) {
+				error("ERROR: Unable to get SHSH blobs for this device (recovery OS Root Ticket)\n");
+				return -1;
+			}
+		}
+
 		if (stashbag_commit_required) {
 			plist_t ticket = plist_dict_get_item(client->tss, "ApImg4Ticket");
 			if (!ticket || plist_get_node_type(ticket) != PLIST_DATA) {
@@ -1142,7 +1196,7 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 					strcpy(zfn, "shsh");
 				}
 				mkdir_with_parents(zfn, 0755);
-				sprintf(zfn+strlen(zfn), "/" FMT_qu "-%s-%s.shsh", (long long int)client->ecid, client->device->product_type, client->version);
+				sprintf(zfn+strlen(zfn), "/%" PRIu64 "-%s-%s.shsh", client->ecid, client->device->product_type, client->version);
 				struct stat fst;
 				if (stat(zfn, &fst) != 0) {
 					gzFile zf = gzopen(zfn, "wb");
@@ -1245,15 +1299,15 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			}
 		}
 
-#ifdef USE_MUTEX_INSTEAD_WAIT	
-		mutex_lock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT	
+			mutex_lock(&client->device_event_mutex);
+		#endif
 
 		/* now we load the iBEC */
 		if (recovery_send_ibec(client, build_identity) < 0) {
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 			error("ERROR: Unable to send iBEC\n");
 			if (delete_fs && filesystem)
 				unlink(filesystem);
@@ -1262,15 +1316,16 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 		recovery_client_free(client);
 
 		debug("Waiting for device to disconnect...\n");
-#ifdef USE_MUTEX_INSTEAD_WAIT
-		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-#else
-		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+		#else
+			WAIT_FOR(client->mode == &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT), 10);
+		#endif	
+
 		if (client->mode != &idevicerestore_modes[MODE_UNKNOWN] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 
 			if (!(client->flags & FLAG_QUIT)) {
 				error("ERROR: Device did not disconnect. Possibly invalid iBEC. Reset device and try again.\n");
@@ -1280,15 +1335,16 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 			return -2;
 		}
 		debug("Waiting for device to reconnect in recovery mode...\n");
-#ifdef USE_MUTEX_INSTEAD_WAIT		
-		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
-#else
-		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 10);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 10000);
+		#else
+			WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 10);
+		#endif	
+
 		if (client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT					
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 			if (!(client->flags & FLAG_QUIT)) {
 				error("ERROR: Device did not reconnect in recovery mode. Possibly invalid iBEC. Reset device and try again.\n");
 			}
@@ -1296,9 +1352,9 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 				unlink(filesystem);
 			return -2;
 		}
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 	}
 	idevicerestore_progress(client, RESTORE_STEP_PREPARE, 0.5);
 	if (client->flags & FLAG_QUIT) {
@@ -1378,31 +1434,38 @@ int idevicerestore_start(struct idevicerestore_client_t* client)
 	idevicerestore_progress(client, RESTORE_STEP_PREPARE, 0.9);
 
 	if (client->mode->index != MODE_RESTORE) {
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-		mutex_lock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT	
+			mutex_lock(&client->device_event_mutex);
+		#endif
 		info("Waiting for device to enter restore mode...\n");
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 180000);
-#else
-		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RESTORE] || (client->flags & FLAG_QUIT), 180);
-#endif		
+		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 180000);
+		#else
+			WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RESTORE] || (client->flags & FLAG_QUIT), 180);
+		#endif	
+
 		if (client->mode != &idevicerestore_modes[MODE_RESTORE] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT							
-			mutex_unlock(&client->device_event_mutex);
-#endif			
+			#ifdef USE_MUTEX_INSTEAD_WAIT
+				mutex_unlock(&client->device_event_mutex);
+			#endif
 			error("ERROR: Device failed to enter restore mode.\n");
+			error("Please make sure that usbmuxd is running.\n");
 			if (delete_fs && filesystem)
 				unlink(filesystem);
 			return -1;
 		}
-#ifdef USE_MUTEX_INSTEAD_WAIT						
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 	}
 
 	// device is finally in restore mode, let's do this
 	if (client->mode->index == MODE_RESTORE) {
+		if ((client->flags & FLAG_NO_RESTORE) != 0) {
+			info("Device is now in restore mode. Exiting as requested.");
+			return 0;
+		}
 		client->ignore_device_add_events = 1;
 		info("About to restore device... \n");
 		result = restore_device(client, build_identity, filesystem);
@@ -1455,10 +1518,8 @@ struct idevicerestore_client_t* idevicerestore_client_new(void)
 	}
 	memset(client, '\0', sizeof(struct idevicerestore_client_t));
 	client->mode = &idevicerestore_modes[MODE_UNKNOWN];
-#ifdef USE_MUTEX_INSTEAD_WAIT					
 	mutex_init(&client->device_event_mutex);
 	cond_init(&client->device_event_cond);
-#endif	
 	return client;
 }
 
@@ -1474,11 +1535,9 @@ void idevicerestore_client_free(struct idevicerestore_client_t* client)
 	if (client->idevice_e_ctx) {
 		idevice_event_unsubscribe();
 	}
-#ifdef USE_MUTEX_INSTEAD_WAIT					
 	cond_destroy(&client->device_event_cond);
 	mutex_destroy(&client->device_event_mutex);
-#endif
-	
+
 	if (client->tss_url) {
 		free(client->tss_url);
 	}
@@ -1515,7 +1574,7 @@ void idevicerestore_client_free(struct idevicerestore_client_t* client)
 	free(client);
 }
 
-void idevicerestore_set_ecid(struct idevicerestore_client_t* client, unsigned long long ecid)
+void idevicerestore_set_ecid(struct idevicerestore_client_t* client, uint64_t ecid)
 {
 	if (!client)
 		return;
@@ -1602,7 +1661,7 @@ int main(int argc, char* argv[]) {
 	struct idevicerestore_client_t* client = idevicerestore_client_new();
 	if (client == NULL) {
 		error("ERROR: could not create idevicerestore client\n");
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	idevicerestore_client = client;
@@ -1628,11 +1687,11 @@ int main(int argc, char* argv[]) {
 		client->flags |= FLAG_INTERACTIVE;
 	}
 
-	while ((opt = getopt_long(argc, argv, "dhcesxtpli:u:nC:kyPRT:", longopts, &optindex)) > 0) {
+	while ((opt = getopt_long(argc, argv, "dhcesxtpli:u:nC:kyPRT:zv", longopts, &optindex)) > 0) {
 		switch (opt) {
 		case 'h':
 			usage(argc, argv, 0);
-			return 0;
+			return EXIT_SUCCESS;
 
 		case 'd':
 			client->flags |= FLAG_DEBUG;
@@ -1667,7 +1726,7 @@ int main(int argc, char* argv[]) {
 				}
 				if (client->ecid == 0) {
 					error("ERROR: Could not parse ECID from '%s'\n", optarg);
-					return -1;
+					return EXIT_FAILURE;
 				}
 			}
 			break;
@@ -1676,7 +1735,7 @@ int main(int argc, char* argv[]) {
 			if (!*optarg) {
 				error("ERROR: UDID must not be empty!\n");
 				usage(argc, argv, 1);
-				return -1;
+				return EXIT_FAILURE;
 			}
 			client->udid = strdup(optarg);
 			break;
@@ -1713,20 +1772,29 @@ int main(int argc, char* argv[]) {
 			client->flags |= FLAG_ALLOW_RESTORE_MODE;
 			break;
 
+		case 'z':
+			client->flags |= FLAG_NO_RESTORE;
+			break;
+
+		case 'v':
+			info("%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
+			return EXIT_SUCCESS;
+
 		case 'T': {
 			size_t root_ticket_len = 0;
 			unsigned char* root_ticket = NULL;
 			if (read_file(optarg, (void**)&root_ticket, &root_ticket_len) != 0) {
-				return -1;
+				return EXIT_FAILURE;
 			}
 			client->root_ticket = root_ticket;
 			client->root_ticket_len = (int)root_ticket_len;
 			info("Using ApTicket found at %s length %u\n", optarg, client->root_ticket_len);
 			break;
 		}
+
 		default:
 			usage(argc, argv, 1);
-			return -1;
+			return EXIT_FAILURE;
 		}
 	}
 
@@ -1737,12 +1805,12 @@ int main(int argc, char* argv[]) {
 		ipsw = argv[0];
 	} else {
 		usage(argc, argv, 1);
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	if ((client->flags & FLAG_LATEST) && (client->flags & FLAG_CUSTOM)) {
 		error("ERROR: You can't use --custom and --latest options at the same time.\n");
-		return -1;
+		return EXIT_FAILURE;
 	}
 
 	if (ipsw) {
@@ -1757,7 +1825,7 @@ int main(int argc, char* argv[]) {
 
 	curl_global_cleanup();
 
-	return result;
+	return (result == 0) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 #endif
 
@@ -2031,6 +2099,79 @@ plist_t build_manifest_get_build_identity_for_model_with_restore_behavior(plist_
 	return NULL;
 }
 
+plist_t build_manifest_get_build_identity_for_model_with_restore_behavior_and_global_signing(
+		plist_t build_manifest,
+		const char *hardware_model,
+		const char *behavior,
+		uint8_t global_signing)
+{
+	plist_t build_identities_array = plist_dict_get_item(build_manifest, "BuildIdentities");
+	if (!build_identities_array || plist_get_node_type(build_identities_array) != PLIST_ARRAY) {
+		error("ERROR: Unable to find build identities node\n");
+		return NULL;
+	}
+
+	uint32_t i;
+	for (i = 0; i < plist_array_get_size(build_identities_array); i++) {
+		plist_t ident = plist_array_get_item(build_identities_array, i);
+		if (!ident || plist_get_node_type(ident) != PLIST_DICT) {
+			continue;
+		}
+		plist_t info_dict = plist_dict_get_item(ident, "Info");
+		if (!info_dict || plist_get_node_type(ident) != PLIST_DICT) {
+			continue;
+		}
+		plist_t devclass = plist_dict_get_item(info_dict, "DeviceClass");
+		if (!devclass || plist_get_node_type(devclass) != PLIST_STRING) {
+			continue;
+		}
+		char *str = NULL;
+		plist_get_string_val(devclass, &str);
+		if (strcasecmp(str, hardware_model) != 0) {
+			free(str);
+			continue;
+		}
+		free(str);
+		str = NULL;
+
+		plist_t global_signing_node = plist_dict_get_item(info_dict, "VariantSupportsGlobalSigning");
+		if (!global_signing_node) {
+			if (global_signing) {
+				continue;
+			}
+		} else {
+			uint8_t is_global_signing;
+			plist_get_bool_val(global_signing_node, &is_global_signing);
+
+			if (global_signing && !is_global_signing) {
+				continue;
+			} else if (!global_signing && is_global_signing) {
+				continue;
+			}
+		}
+
+		if (behavior) {
+			plist_t rbehavior = plist_dict_get_item(info_dict, "RestoreBehavior");
+			if (!rbehavior || plist_get_node_type(rbehavior) != PLIST_STRING) {
+				continue;
+			}
+			plist_get_string_val(rbehavior, &str);
+			if (strcasecmp(str, behavior) != 0) {
+				free(str);
+				continue;
+			} else {
+				free(str);
+				return plist_copy(ident);
+			}
+			free(str);
+		} else {
+			return plist_copy(ident);
+		}
+	}
+
+	return NULL;
+}
+
 plist_t build_manifest_get_build_identity_for_model(plist_t build_manifest, const char *hardware_model)
 {
 	return build_manifest_get_build_identity_for_model_with_restore_behavior(build_manifest, hardware_model, NULL);
@@ -2109,9 +2250,9 @@ int get_tss_response(struct idevicerestore_client_t* client, plist_t build_ident
 		char zfn[1024];
 		if (client->version) {
 			if (client->cache_dir) {
-				sprintf(zfn, "%s/shsh/" FMT_qu "-%s-%s.shsh", client->cache_dir, (long long int)client->ecid, client->device->product_type, client->version);
+				sprintf(zfn, "%s/shsh/%" PRIu64 "-%s-%s.shsh", client->cache_dir, client->ecid, client->device->product_type, client->version);
 			} else {
-				sprintf(zfn, "shsh/" FMT_qu "-%s-%s.shsh", (long long int)client->ecid, client->device->product_type, client->version);
+				sprintf(zfn, "shsh/%" PRIu64 "-%s-%s.shsh", client->ecid, client->device->product_type, client->version);
 			}
 			struct stat fst;
 			if (stat(zfn, &fst) == 0) {
@@ -2253,7 +2394,7 @@ int get_tss_response(struct idevicerestore_client_t* client, plist_t build_ident
 			if (node) {
 				plist_dict_set_item(parameters, "BbSNUM", plist_copy(node));
 			}
-		
+
 			/* add baseband parameters */
 			tss_request_add_baseband_tags(request, parameters, NULL);
 
@@ -2286,6 +2427,274 @@ int get_tss_response(struct idevicerestore_client_t* client, plist_t build_ident
 			}
 		}
 		client->preflight_info = pinfo;
+	}
+
+	/* send request and grab response */
+	response = tss_request_send(request, client->tss_url);
+	if (response == NULL) {
+		info("ERROR: Unable to send TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	info("Received SHSH blobs\n");
+
+	plist_free(request);
+	plist_free(parameters);
+
+	*tss = response;
+
+	return 0;
+}
+
+int get_recoveryos_root_ticket_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss) {
+	plist_t request = NULL;
+	plist_t response = NULL;
+	*tss = NULL;
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+
+	/* ApECID */
+	plist_dict_set_item(parameters, "ApECID", plist_new_uint(client->ecid));
+	plist_dict_set_item(parameters, "Ap,LocalBoot", plist_new_bool(0));
+
+	/* ApNonce */
+	if (client->nonce) {
+		plist_dict_set_item(parameters, "ApNonce", plist_new_data((const char*)client->nonce, client->nonce_size));
+	}
+	unsigned char* sep_nonce = NULL;
+	int sep_nonce_size = 0;
+	get_sep_nonce(client, &sep_nonce, &sep_nonce_size);
+
+	/* ApSepNonce */
+	if (sep_nonce) {
+		plist_dict_set_item(parameters, "ApSepNonce", plist_new_data((const char*)sep_nonce, sep_nonce_size));
+		free(sep_nonce);
+	}
+
+	/* ApProductionMode */
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(1));
+
+	/* ApSecurityMode */
+	if (client->image4supported) {
+		plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(1));
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(1));
+	} else {
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(0));
+	}
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	/* create basic request */
+	/* Adds @BBTicket, @HostPlatformInfo, @VersionInfo, @UUID */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	/* Adds Ap,OSLongVersion, AppNonce, @ApImg4Ticket */
+	if (tss_request_add_ap_img4_tags(request, parameters) < 0) {
+		error("ERROR: Unable to add AP IMG4 tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add AP tags from manifest */
+	if (tss_request_add_common_tags(request, parameters, NULL) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add AP tags from manifest */
+	/* Fills digests & co */
+	if (tss_request_add_ap_recovery_tags(request, parameters, NULL) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* send request and grab response */
+	response = tss_request_send(request, client->tss_url);
+	if (response == NULL) {
+		info("ERROR: Unable to send TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+	// request_add_ap_tags
+
+	info("Received SHSH blobs\n");
+
+	plist_free(request);
+	plist_free(parameters);
+
+	*tss = response;
+
+	return 0;
+}
+
+int get_recovery_os_local_policy_tss_response(
+				struct idevicerestore_client_t* client,
+				plist_t build_identity,
+				plist_t* tss,
+				plist_t args) {
+	plist_t request = NULL;
+	plist_t response = NULL;
+	*tss = NULL;
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+	plist_dict_set_item(parameters, "ApECID", plist_new_uint(client->ecid));
+	plist_dict_set_item(parameters, "Ap,LocalBoot", plist_new_bool(1));
+
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(1));
+	if (client->image4supported) {
+		plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(1));
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(1));
+	} else {
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(0));
+	}
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	// Add Ap,LocalPolicy
+	uint8_t digest[SHA384_DIGEST_LENGTH];
+	SHA384(lpol_file, lpol_file_length, digest);
+	plist_t lpol = plist_new_dict();
+	plist_dict_set_item(lpol, "Digest", plist_new_data((char*)digest, SHA384_DIGEST_LENGTH));
+	plist_dict_set_item(lpol, "Trusted", plist_new_bool(1));
+	plist_dict_set_item(parameters, "Ap,LocalPolicy", lpol);
+
+	plist_t im4m_hash = plist_dict_get_item(args, "Ap,NextStageIM4MHash");
+	plist_dict_set_item(parameters, "Ap,NextStageIM4MHash", plist_copy(im4m_hash));
+
+	plist_t nonce_hash = plist_dict_get_item(args, "Ap,RecoveryOSPolicyNonceHash");
+	plist_dict_set_item(parameters, "Ap,RecoveryOSPolicyNonceHash", plist_copy(nonce_hash));
+
+	plist_t vol_uuid_node = plist_dict_get_item(args, "Ap,VolumeUUID");
+	char* vol_uuid_str = NULL;
+	plist_get_string_val(vol_uuid_node, &vol_uuid_str);
+	unsigned int vuuid[16];
+	unsigned char vol_uuid[16];
+	if (sscanf(vol_uuid_str, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", &vuuid[0], &vuuid[1], &vuuid[2], &vuuid[3], &vuuid[4], &vuuid[5], &vuuid[6], &vuuid[7], &vuuid[8], &vuuid[9], &vuuid[10], &vuuid[11], &vuuid[12], &vuuid[13], &vuuid[14], &vuuid[15]) != 16) {
+		error("ERROR: Failed to parse Ap,VolumeUUID (%s)\n", vol_uuid_str);
+		free(vol_uuid_str);
+		return -1;
+	}
+	free(vol_uuid_str);
+	int i;
+	for (i = 0; i < 16; i++) {
+		vol_uuid[i] = (unsigned char)vuuid[i];
+	}
+	plist_dict_set_item(parameters, "Ap,VolumeUUID", plist_new_data((char*)vol_uuid, 16));
+
+	/* create basic request */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	if (tss_request_add_local_policy_tags(request, parameters) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* send request and grab response */
+	response = tss_request_send(request, client->tss_url);
+	if (response == NULL) {
+		info("ERROR: Unable to send TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
+	}
+
+	info("Received SHSH blobs\n");
+
+	plist_free(request);
+	plist_free(parameters);
+
+	*tss = response;
+
+	return 0;
+}
+
+int get_local_policy_tss_response(struct idevicerestore_client_t* client, plist_t build_identity, plist_t* tss) {
+	plist_t request = NULL;
+	plist_t response = NULL;
+	*tss = NULL;
+
+	/* populate parameters */
+	plist_t parameters = plist_new_dict();
+	plist_dict_set_item(parameters, "ApECID", plist_new_uint(client->ecid));
+	plist_dict_set_item(parameters, "Ap,LocalBoot", plist_new_bool(0));
+	if (client->nonce) {
+		plist_dict_set_item(parameters, "ApNonce", plist_new_data((const char*)client->nonce, client->nonce_size));
+	}
+	unsigned char* sep_nonce = NULL;
+	int sep_nonce_size = 0;
+	get_sep_nonce(client, &sep_nonce, &sep_nonce_size);
+
+	if (sep_nonce) {
+		plist_dict_set_item(parameters, "ApSepNonce", plist_new_data((const char*)sep_nonce, sep_nonce_size));
+		free(sep_nonce);
+	}
+
+	plist_dict_set_item(parameters, "ApProductionMode", plist_new_bool(1));
+	if (client->image4supported) {
+		plist_dict_set_item(parameters, "ApSecurityMode", plist_new_bool(1));
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(1));
+	} else {
+		plist_dict_set_item(parameters, "ApSupportsImg4", plist_new_bool(0));
+	}
+
+	tss_parameters_add_from_manifest(parameters, build_identity);
+
+	// Add Ap,LocalPolicy
+	uint8_t digest[SHA384_DIGEST_LENGTH];
+	SHA384(lpol_file, lpol_file_length, digest);
+	plist_t lpol = plist_new_dict();
+	plist_dict_set_item(lpol, "Digest", plist_new_data((char*)digest, SHA384_DIGEST_LENGTH));
+	plist_dict_set_item(lpol, "Trusted", plist_new_bool(1));
+	plist_dict_set_item(parameters, "Ap,LocalPolicy", lpol);
+
+	// Add Ap,NextStageIM4MHash
+	// Get previous TSS ticket
+	uint8_t* ticket = NULL;
+	uint32_t ticket_length = 0;
+	tss_response_get_ap_img4_ticket(client->tss, &ticket, &ticket_length);
+	// Hash it and add it as Ap,NextStageIM4MHash
+	uint8_t hash[SHA384_DIGEST_LENGTH];
+	SHA384(ticket, ticket_length, hash);
+	plist_dict_set_item(parameters, "Ap,NextStageIM4MHash", plist_new_data((char*)hash, SHA384_DIGEST_LENGTH));
+
+	/* create basic request */
+	request = tss_request_new(NULL);
+	if (request == NULL) {
+		error("ERROR: Unable to create TSS request\n");
+		plist_free(parameters);
+		return -1;
+	}
+
+	/* add common tags from manifest */
+	if (tss_request_add_local_policy_tags(request, parameters) < 0) {
+		error("ERROR: Unable to add common tags to TSS request\n");
+		plist_free(request);
+		plist_free(parameters);
+		return -1;
 	}
 
 	/* send request and grab response */
@@ -2362,7 +2771,7 @@ int extract_component(const char* ipsw, const char* path, unsigned char** compon
 	else
 		component_name = (char*) path;
 
-	info("Extracting %s...\n", component_name);
+	info("Extracting %s (%s)...\n", component_name, path);
 	if (ipsw_extract_to_memory(ipsw, path, component_data, component_size) < 0) {
 		error("ERROR: Unable to extract %s from %s\n", component_name, ipsw);
 		return -1;

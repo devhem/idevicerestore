@@ -147,7 +147,7 @@ int normal_check_mode(struct idevicerestore_client_t* client) {
 	if (!device) {
 		return -1;
 	}
-	idevice_free(device);	
+	idevice_free(device);
 
 	return 0;
 }
@@ -225,7 +225,7 @@ int normal_enter_recovery(struct idevicerestore_client_t* client)
 
 	lockdown_error = lockdownd_client_new(device, &lockdown, "idevicerestore");
 	if (lockdown_error != LOCKDOWN_E_SUCCESS) {
-		error("ERROR: Unable to connect to lockdownd service\n");
+		error("ERROR: Unable to connect to lockdownd: %s (%d)\n", lockdownd_strerror(lockdown_error), lockdown_error);
 		idevice_free(device);
 		return -1;
 	}
@@ -237,8 +237,18 @@ int normal_enter_recovery(struct idevicerestore_client_t* client)
 	}
 
 	lockdown_error = lockdownd_enter_recovery(lockdown);
+	if (lockdown_error == LOCKDOWN_E_SESSION_INACTIVE) {
+		lockdownd_client_free(lockdown);
+		lockdown = NULL;
+		if (LOCKDOWN_E_SUCCESS != (lockdown_error = lockdownd_client_new_with_handshake(device, &lockdown, "idevicerestore"))) {
+			error("ERROR: Could not connect to lockdownd: %s (%d)\n", lockdownd_strerror(lockdown_error), lockdown_error);
+			idevice_free(device);
+			return -1;
+		}
+		lockdown_error = lockdownd_enter_recovery(lockdown);
+	}
 	if (lockdown_error != LOCKDOWN_E_SUCCESS) {
-		error("ERROR: Unable to place device in recovery mode\n");
+		error("ERROR: Unable to place device in recovery mode: %s (%d)\n", lockdownd_strerror(lockdown_error), lockdown_error);
 		lockdownd_client_free(lockdown);
 		idevice_free(device);
 		return -1;
@@ -249,39 +259,40 @@ int normal_enter_recovery(struct idevicerestore_client_t* client)
 	lockdown = NULL;
 	device = NULL;
 
-#ifdef USE_MUTEX_INSTEAD_WAIT				
-	mutex_lock(&client->device_event_mutex);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		mutex_lock(&client->device_event_mutex);
+	#endif	
 	debug("DEBUG: Waiting for device to disconnect...\n");
-#ifdef USE_MUTEX_INSTEAD_WAIT					
-	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
-#else
-	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_NORMAL] || (client->flags & FLAG_QUIT), 60);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
+	#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_NORMAL] || (client->flags & FLAG_QUIT), 60);
+	#endif	
+
 	if (client->mode == &idevicerestore_modes[MODE_NORMAL] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT							
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 		error("ERROR: Failed to place device in recovery mode\n");
 		return -1;
 	}
 
 	debug("DEBUG: Waiting for device to connect in recovery mode...\n");
-#ifdef USE_MUTEX_INSTEAD_WAIT						
-	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
-#else
-	WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 60);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 60000);
+	#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_NORMAL] || (client->flags & FLAG_QUIT), 60);
+	#endif	
 	if (client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT						
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 		error("ERROR: Failed to enter recovery mode\n");
 		return -1;
 	}
-#ifdef USE_MUTEX_INSTEAD_WAIT							
-	mutex_unlock(&client->device_event_mutex);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		mutex_unlock(&client->device_event_mutex);
+	#endif
 
 	if (recovery_client_new(client) < 0) {
 		error("ERROR: Unable to enter recovery mode\n");

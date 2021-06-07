@@ -35,7 +35,7 @@
 #include "restore.h"
 #include "recovery.h"
 
-int recovery_progress_callback(irecv_client_t client, const irecv_event_t* event) {
+static int recovery_progress_callback(irecv_client_t client, const irecv_event_t* event) {
 	if (event->type == IRECV_PROGRESS) {
 		//print_progress_bar(event->progress);
 	}
@@ -149,6 +149,8 @@ int recovery_set_autoboot(struct idevicerestore_client_t* client, int enable) {
 int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build_identity) {
 	if (client->build_major >= 8) {
 		client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress");
+	} else if (client->build_major >= 20) {
+		client->restore_boot_args = strdup("rd=md0 nand-enable-reformat=1 -progress -restore");
 	}
 
 	/* upload data to make device boot restore mode */
@@ -221,38 +223,47 @@ int recovery_enter_restore(struct idevicerestore_client_t* client, plist_t build
 	}
 
 	/* send devicetree and load it */
-	if (recovery_send_devicetree(client, build_identity) < 0) {
+	if (recovery_send_component_and_command(client, build_identity, "RestoreDeviceTree", "devicetree") < 0) {
 		error("ERROR: Unable to send DeviceTree\n");
 		return -1;
 	}
 
-#ifdef USE_MUTEX_INSTEAD_WAIT
-	mutex_lock(&client->device_event_mutex);
-#endif
+	if (build_identity_has_component(build_identity, "RestoreSEP")) {
+		/* send rsepfirmware and load it */
+		if (recovery_send_component_and_command(client, build_identity, "RestoreSEP", "rsepfirmware") < 0) {
+			error("ERROR: Unable to send RestoreSEP\n");
+			return -1;
+		}
+	}
+
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		mutex_lock(&client->device_event_mutex);
+	#endif	
 	if (recovery_send_kernelcache(client, build_identity) < 0) {
-#ifdef USE_MUTEX_INSTEAD_WAIT		
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 		error("ERROR: Unable to send KernelCache\n");
 		return -1;
 	}
 
 	debug("DEBUG: Waiting for device to disconnect...\n");
-#ifdef USE_MUTEX_INSTEAD_WAIT	
-	cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 30000);
-#else
-	WAIT_FOR(client->mode != &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 30);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		cond_wait_timeout(&client->device_event_cond, &client->device_event_mutex, 30000);
+	#else
+		WAIT_FOR(client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT), 30);
+	#endif	
+
 	if (client->mode == &idevicerestore_modes[MODE_RECOVERY] || (client->flags & FLAG_QUIT)) {
-#ifdef USE_MUTEX_INSTEAD_WAIT			
-		mutex_unlock(&client->device_event_mutex);
-#endif		
+		#ifdef USE_MUTEX_INSTEAD_WAIT
+			mutex_unlock(&client->device_event_mutex);
+		#endif
 		error("ERROR: Failed to place device in restore mode\n");
 		return -1;
 	}
-#ifdef USE_MUTEX_INSTEAD_WAIT		
-	mutex_unlock(&client->device_event_mutex);
-#endif	
+	#ifdef USE_MUTEX_INSTEAD_WAIT
+		mutex_unlock(&client->device_event_mutex);
+	#endif
 
 	return 0;
 }
@@ -261,7 +272,7 @@ int recovery_send_ticket(struct idevicerestore_client_t* client)
 {
 	if (!client->tss) {
 		error("ERROR: ApTicket requested but no TSS present\n");
-		return -1;		
+		return -1;
 	}
 
 	unsigned char* data = NULL;
@@ -288,7 +299,8 @@ int recovery_send_ticket(struct idevicerestore_client_t* client)
 	return 0;
 }
 
-int recovery_send_component(struct idevicerestore_client_t* client, plist_t build_identity, const char* component) {
+int recovery_send_component(struct idevicerestore_client_t* client, plist_t build_identity, const char* component)
+{
 	unsigned int size = 0;
 	unsigned char* data = NULL;
 	char* path = NULL;
@@ -330,6 +342,24 @@ int recovery_send_component(struct idevicerestore_client_t* client, plist_t buil
 	free(data);
 	if (err != IRECV_E_SUCCESS) {
 		error("ERROR: Unable to send %s component: %s\n", component, irecv_strerror(err));
+		return -1;
+	}
+
+	return 0;
+}
+
+int recovery_send_component_and_command(struct idevicerestore_client_t* client, plist_t build_identity, const char* component, const char* command)
+{
+	irecv_error_t recovery_error = IRECV_E_SUCCESS;
+
+	if (recovery_send_component(client, build_identity, component) < 0) {
+		error("ERROR: Unable to send %s to device.\n", component);
+		return -1;
+	}
+
+	recovery_error = irecv_send_command(client->recovery->client, command);
+	if (recovery_error != IRECV_E_SUCCESS) {
+		error("ERROR: Unable to execute %s\n", component);
 		return -1;
 	}
 
@@ -396,31 +426,8 @@ int recovery_send_applelogo(struct idevicerestore_client_t* client, plist_t buil
 	return 0;
 }
 
-int recovery_send_devicetree(struct idevicerestore_client_t* client, plist_t build_identity) {
-	const char* component = "RestoreDeviceTree";
-	irecv_error_t recovery_error = IRECV_E_SUCCESS;
-
-	if(client->recovery == NULL) {
-		if (recovery_client_new(client) < 0) {
-			return -1;
-		}
-	}
-
-	if (recovery_send_component(client, build_identity, component) < 0) {
-		error("ERROR: Unable to send %s to device.\n", component);
-		return -1;
-	}
-
-	recovery_error = irecv_send_command(client->recovery->client, "devicetree");
-	if (recovery_error != IRECV_E_SUCCESS) {
-		error("ERROR: Unable to execute %s\n", component);
-		return -1;
-	}
-
-	return 0;
-}
-
-int recovery_send_loaded_by_iboot(struct idevicerestore_client_t* client, plist_t build_identity) {
+int recovery_send_loaded_by_iboot(struct idevicerestore_client_t* client, plist_t build_identity)
+{
 	if (client->recovery == NULL) {
 		if (recovery_client_new(client) < 0) {
 			return -1;
@@ -442,20 +449,21 @@ int recovery_send_loaded_by_iboot(struct idevicerestore_client_t* client, plist_
 		plist_dict_next_item(manifest_node, iter, &key, &node);
 		if (key == NULL)
 			break;
+
 		plist_t iboot_node = plist_access_path(node, 2, "Info", "IsLoadedByiBoot");
-		if (iboot_node && plist_get_node_type(iboot_node) == PLIST_BOOLEAN) {
+		plist_t iboot_stg1_node = plist_access_path(node, 2, "Info", "IsLoadedByiBootStage1");
+		uint8_t is_stg1 = 0;
+		if (iboot_stg1_node && plist_get_node_type(iboot_stg1_node) == PLIST_BOOLEAN) {
+			plist_get_bool_val(iboot_stg1_node, &is_stg1);
+		}
+		if (iboot_node && plist_get_node_type(iboot_node) == PLIST_BOOLEAN && !is_stg1) {
 			uint8_t b = 0;
 			plist_get_bool_val(iboot_node, &b);
 			if (b) {
 				debug("DEBUG: %s is loaded by iBoot.\n", key);
-				if (recovery_send_component(client, build_identity, key) < 0) {
+				if (recovery_send_component_and_command(client, build_identity, key, "firmware") < 0) {
 					error("ERROR: Unable to send component '%s' to device.\n", key);
 					err++;
-				} else {
-					if (irecv_send_command(client->recovery->client, "firmware") != IRECV_E_SUCCESS) {
-						error("ERROR: iBoot command 'firmware' failed for component '%s'\n", key);
-						err++;
-					}
 				}
 			}
 		}

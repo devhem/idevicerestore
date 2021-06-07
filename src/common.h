@@ -32,6 +32,7 @@ extern "C" {
 #include <config.h>
 #endif
 
+#include <inttypes.h>
 #include <unistd.h>
 
 #include <plist/plist.h>
@@ -58,7 +59,6 @@ extern "C" {
 
 #define USER_AGENT_STRING "InetURL/1.0"
 
-
 #define USE_MUTEX_INSTEAD_WAIT            0
 
 struct dfu_client_t;
@@ -84,6 +84,8 @@ struct idevicerestore_entry_t {
 struct idevicerestore_client_t {
 	int flags;
 	plist_t tss;
+	plist_t tss_localpolicy;
+	plist_t tss_recoveryos_root_ticket;
 	char* tss_url;
 	plist_t version_data;
 	uint64_t ecid;
@@ -115,7 +117,7 @@ struct idevicerestore_client_t {
 #ifdef USE_MUTEX_INSTEAD_WAIT	
 	mutex_t device_event_mutex;
 	cond_t device_event_cond;
-#endif	
+#endif
 	int ignore_device_add_events;
 };
 
@@ -123,8 +125,11 @@ extern struct idevicerestore_mode_t idevicerestore_modes[];
 
 extern int idevicerestore_debug;
 
+__attribute__((format(printf, 1, 2)))
 void info(const char* format, ...);
+__attribute__((format(printf, 1, 2)))
 void error(const char* format, ...);
+__attribute__((format(printf, 1, 2)))
 void debug(const char* format, ...);
 
 void debug_plist(plist_t plist);
@@ -138,8 +143,6 @@ char *generate_guid(void);
 #include <windows.h>
 #include <unistd.h>
 #define __mkdir(path, mode) mkdir(path)
-#define FMT_qu "%I64u"
-#define FMT_016llx "%016I64x"
 #ifndef sleep
 #define sleep(x) Sleep(x*1000)
 #endif
@@ -147,8 +150,6 @@ char *generate_guid(void);
 #else
 #include <sys/stat.h>
 #define __mkdir(path, mode) mkdir(path, mode)
-#define FMT_qu "%qu"
-#define FMT_016llx "%016llx"
 #define __usleep(x) usleep(x)
 #endif
 
